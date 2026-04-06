@@ -8,10 +8,14 @@ VERSION="${1:-0.1.0}"
 BUILD_DIR="$ROOT_DIR/dist/build"
 STAGE_DIR="$ROOT_DIR/dist/stage"
 APP_DIR="$BUILD_DIR/$APP_NAME.app"
+ICON_DIR="$BUILD_DIR/icon"
+ICON_PATH="$ICON_DIR/AppIcon.icns"
 DMG_PATH="$ROOT_DIR/dist/${APP_NAME}-${VERSION}.dmg"
 
 rm -rf "$BUILD_DIR" "$STAGE_DIR"
-mkdir -p "$BUILD_DIR" "$STAGE_DIR"
+mkdir -p "$BUILD_DIR" "$STAGE_DIR" "$ICON_DIR"
+
+swift "$ROOT_DIR/scripts/generate-icon.swift" "$ICON_DIR" >/dev/null
 
 swift build -c release --package-path "$ROOT_DIR" --product "$APP_NAME" >/dev/null
 BIN_DIR="$(swift build -c release --package-path "$ROOT_DIR" --show-bin-path)"
@@ -25,6 +29,7 @@ fi
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
 cp "$BIN_PATH" "$APP_DIR/Contents/MacOS/$APP_NAME"
 chmod +x "$APP_DIR/Contents/MacOS/$APP_NAME"
+cp "$ICON_PATH" "$APP_DIR/Contents/Resources/AppIcon.icns"
 
 cat > "$APP_DIR/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -35,6 +40,8 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
   <string>en</string>
   <key>CFBundleExecutable</key>
   <string>${APP_NAME}</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
   <key>CFBundleIdentifier</key>
   <string>com.juniorxxue.codex-switcher-menubar</string>
   <key>CFBundleInfoDictionaryVersion</key>

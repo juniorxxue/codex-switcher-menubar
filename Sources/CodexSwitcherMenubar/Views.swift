@@ -12,7 +12,9 @@ struct MenuBarLabelView: View {
             if let label = model.menuBarLabelText, !label.isEmpty {
                 Text(label)
                     .font(.system(size: 12, weight: .semibold))
+                    .monospacedDigit()
                     .lineLimit(1)
+                    .contentTransition(.numericText())
             }
         }
     }
@@ -44,6 +46,7 @@ struct MenuBarContentView: View {
                             }
                         }
                         .padding(.top, 1)
+                        .animation(.snappy(duration: 0.2), value: model.activeAccount?.id)
                     }
                     .frame(minHeight: menuAccountListMinHeight, maxHeight: 420)
                 }
@@ -143,6 +146,8 @@ struct AccountSwitchRow: View {
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
+        let isActive = model.isActive(account.id)
+
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(account.name)
@@ -156,10 +161,11 @@ struct AccountSwitchRow: View {
                         .truncationMode(.middle)
                 }
 
-                if model.isActive(account.id) {
+                if isActive {
                     Image(systemName: "checkmark.circle.fill")
                         .font(.caption)
                         .foregroundStyle(.green)
+                        .symbolEffect(.bounce, value: isActive)
                 }
 
                 Spacer(minLength: 8)
@@ -179,12 +185,12 @@ struct AccountSwitchRow: View {
                     .help("Refresh usage")
                 }
 
-                Button(model.isActive(account.id) ? "Active" : "Switch") {
+                Button(isActive ? "Active" : "Switch") {
                     Task {
                         await model.activateAccount(account.id)
                     }
                 }
-                .applySwitcherButtonStyle(isProminent: !model.isActive(account.id))
+                .applySwitcherButtonStyle(isProminent: !isActive)
                 .controlSize(.small)
                 .disabled(model.switchingAccountID == account.id)
             }
@@ -196,6 +202,12 @@ struct AccountSwitchRow: View {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .fill(Color(nsColor: .controlBackgroundColor))
         )
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(isActive ? Color.accentColor.opacity(0.28) : .clear, lineWidth: 1)
+        )
+        .shadow(color: isActive ? Color.accentColor.opacity(0.10) : .clear, radius: 10, y: 4)
+        .animation(.snappy(duration: 0.2), value: isActive)
     }
 }
 

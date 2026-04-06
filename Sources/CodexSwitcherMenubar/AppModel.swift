@@ -47,20 +47,22 @@ final class AppModel: ObservableObject {
     }
 
     var menuBarLabelText: String? {
-        let weightedAccounts = accounts.filter { $0.authMode == .chatGPT }
-        let totalWeight = weightedAccounts.reduce(0.0) { partial, account in
-            partial + menuBarWeight(for: account)
+        guard let activeAccount else {
+            return nil
         }
 
-        guard totalWeight > 0 else {
-            return activeAccount?.shortMenuLabel
+        guard activeAccount.authMode == .chatGPT else {
+            return activeAccount.shortMenuLabel
         }
 
-        let weightedRemaining = weightedAccounts.reduce(0.0) { partial, account in
-            partial + menuBarWeight(for: account) * fiveHourWindowRemaining(for: account)
+        guard let usage = usageByAccount[activeAccount.id],
+              usage.error == nil,
+              let primaryUsedPercent = usage.primaryUsedPercent
+        else {
+            return "—"
         }
-        let remainingPercent = max(0, min((weightedRemaining / totalWeight) * 100.0, 100))
-        return "\(Int(remainingPercent.rounded()))%"
+
+        return "\(Int(primaryUsedPercent.rounded()))%"
     }
 
     init() {
@@ -100,25 +102,31 @@ final class AppModel: ObservableObject {
         }
 
         switchingAccountID = accountID
+        defer { switchingAccountID = nil }
+
         await refreshProcessStatus()
 
-        store.activeAccountID = accountID
-        store.accounts[accountIndex].lastUsedAt = Date()
+        var updatedStore = store
+        updatedStore.activeAccountID = accountID
+        updatedStore.accounts[accountIndex].lastUsedAt = Date()
 
         do {
-            try persistStore()
-            try AuthFileService.writeCurrentAuth(for: store.accounts[accountIndex])
+            let persistedStore = try persistedStore(from: updatedStore)
+            guard let activeIndex = persistedStore.accounts.firstIndex(where: { $0.id == accountID }) else {
+                throw AppError(message: "Switched account could not be found after saving.")
+            }
+
+            try AuthFileService.writeCurrentAuth(for: persistedStore.accounts[activeIndex])
+            store = persistedStore
 
             if processStatus.hasRunningCodex {
                 postMessage("Switched while Codex is running. New shells will use the new account.")
             } else {
-                postMessage("Switched to \(store.accounts[accountIndex].name).")
+                postMessage("Switched to \(persistedStore.accounts[activeIndex].name).")
             }
         } catch {
             postMessage(error.localizedDescription, isError: true)
         }
-
-        switchingAccountID = nil
     }
 
     func refreshUsage(for accountID: UUID, announce: Bool = true) async {
@@ -126,18 +134,18 @@ final class AppModel: ObservableObject {
             return
         }
 
-        refreshingAccountIDs.insert(accountID)
-        defer { refreshingAccountIDs.remove(accountID) }
+        setRefreshing(true, for: accountID)
+        defer { setRefreshing(false, for: accountID) }
 
         do {
             let result = try await UsageService.fetchUsage(for: account)
             replaceAccountIfNeeded(result.account)
-            usageByAccount[accountID] = result.usage
+            setUsage(result.usage, for: accountID)
             if announce {
                 postMessage("Usage refreshed for \(result.account.name).")
             }
         } catch {
-            usageByAccount[accountID] = UsageInfo.error(for: accountID, message: error.localizedDescription)
+            setUsage(UsageInfo.error(for: accountID, message: error.localizedDescription), for: accountID)
             if announce {
                 postMessage(error.localizedDescription, isError: true)
             }
@@ -290,9 +298,11 @@ final class AppModel: ObservableObject {
             return false
         }
 
-        store.accounts[index].name = newName
+        var updatedStore = store
+        updatedStore.accounts[index].name = newName
+
         do {
-            try persistStore()
+            store = try persistedStore(from: updatedStore)
             postMessage("Renamed account to \(newName).")
             return true
         } catch {
@@ -306,20 +316,26 @@ final class AppModel: ObservableObject {
             return
         }
 
-        let deleted = store.accounts.remove(at: index)
-        usageByAccount.removeValue(forKey: accountID)
+        var updatedStore = store
+        let deleted = updatedStore.accounts.remove(at: index)
 
-        if store.activeAccountID == accountID {
-            store.activeAccountID = store.accounts.first?.id
+        if updatedStore.activeAccountID == accountID {
+            updatedStore.activeAccountID = updatedStore.accounts.first?.id
         }
 
         do {
-            try persistStore()
-            if let activeAccount {
+            let persistedStore = try persistedStore(from: updatedStore)
+
+            if let activeAccountID = persistedStore.activeAccountID,
+               let activeAccount = persistedStore.accounts.first(where: { $0.id == activeAccountID })
+            {
                 try AuthFileService.writeCurrentAuth(for: activeAccount)
             } else {
                 try AuthFileService.clearCurrentAuth()
             }
+
+            store = persistedStore
+            removeUsage(for: accountID)
             postMessage("Deleted \(deleted.name).")
         } catch {
             postMessage(error.localizedDescription, isError: true)
@@ -339,15 +355,16 @@ final class AppModel: ObservableObject {
 
     private func loadStore() {
         do {
-            store = try LocalStore.load()
-            normalizeStore()
+            var loadedStore = try LocalStore.load()
+            normalizeStore(&loadedStore)
+            store = loadedStore
         } catch {
             store = AccountsStore()
             postMessage("Failed to load saved accounts: \(error.localizedDescription)", isError: true)
         }
     }
 
-    private func normalizeStore() {
+    private func normalizeStore(_ store: inout AccountsStore) {
         if let activeAccountID = store.activeAccountID,
            !store.accounts.contains(where: { $0.id == activeAccountID })
         {
@@ -355,9 +372,11 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func persistStore() throws {
-        normalizeStore()
-        try LocalStore.save(store)
+    private func persistedStore(from store: AccountsStore) throws -> AccountsStore {
+        var normalizedStore = store
+        normalizeStore(&normalizedStore)
+        try LocalStore.save(normalizedStore)
+        return normalizedStore
     }
 
     private func mergeImportedStore(_ imported: AccountsStore) throws -> ImportMergeSummary {
@@ -368,8 +387,9 @@ final class AppModel: ObservableObject {
         var importedCount = 0
         var importedAccountIDs: [UUID] = []
 
-        var existingIDs = Set(store.accounts.map(\.id))
-        var existingNames = Set(store.accounts.map { $0.name.lowercased() })
+        var updatedStore = store
+        var existingIDs = Set(updatedStore.accounts.map(\.id))
+        var existingNames = Set(updatedStore.accounts.map { $0.name.lowercased() })
 
         for account in imported.accounts {
             let loweredName = account.name.lowercased()
@@ -379,28 +399,28 @@ final class AppModel: ObservableObject {
 
             existingIDs.insert(account.id)
             existingNames.insert(loweredName)
-            store.accounts.append(account)
+            updatedStore.accounts.append(account)
             importedCount += 1
             importedAccountIDs.append(account.id)
         }
 
-        store.version = max(store.version, max(imported.version, 1))
+        updatedStore.version = max(updatedStore.version, max(imported.version, 1))
 
-        let currentActiveIsValid = store.activeAccountID.flatMap { activeID in
-            store.accounts.contains(where: { $0.id == activeID }) ? activeID : nil
+        let currentActiveIsValid = updatedStore.activeAccountID.flatMap { activeID in
+            updatedStore.accounts.contains(where: { $0.id == activeID }) ? activeID : nil
         } != nil
 
         if !currentActiveIsValid {
             if let importedActiveID,
-               store.accounts.contains(where: { $0.id == importedActiveID })
+               updatedStore.accounts.contains(where: { $0.id == importedActiveID })
             {
-                store.activeAccountID = importedActiveID
+                updatedStore.activeAccountID = importedActiveID
             } else {
-                store.activeAccountID = store.accounts.first?.id
+                updatedStore.activeAccountID = updatedStore.accounts.first?.id
             }
         }
 
-        try persistStore()
+        store = try persistedStore(from: updatedStore)
 
         return ImportMergeSummary(
             totalInPayload: totalInPayload,
@@ -415,17 +435,20 @@ final class AppModel: ObservableObject {
             throw AppError(message: "An account named \(account.name) already exists.")
         }
 
-        store.accounts.append(account)
+        var updatedStore = store
+        updatedStore.accounts.append(account)
 
-        if store.activeAccountID == nil {
-            store.activeAccountID = account.id
+        if updatedStore.activeAccountID == nil {
+            updatedStore.activeAccountID = account.id
         }
 
-        try persistStore()
+        let persistedStore = try persistedStore(from: updatedStore)
 
-        if store.activeAccountID == account.id {
+        if persistedStore.activeAccountID == account.id {
             try AuthFileService.writeCurrentAuth(for: account)
         }
+
+        store = persistedStore
     }
 
     private func replaceAccountIfNeeded(_ updatedAccount: StoredAccount) {
@@ -437,12 +460,15 @@ final class AppModel: ObservableObject {
             return
         }
 
-        store.accounts[index] = updatedAccount
+        var updatedStore = store
+        updatedStore.accounts[index] = updatedAccount
+
         do {
-            try persistStore()
-            if store.activeAccountID == updatedAccount.id {
+            let persistedStore = try persistedStore(from: updatedStore)
+            if persistedStore.activeAccountID == updatedAccount.id {
                 try AuthFileService.writeCurrentAuth(for: updatedAccount)
             }
+            store = persistedStore
         } catch {
             postMessage(error.localizedDescription, isError: true)
         }
@@ -501,33 +527,26 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func menuBarWeight(for account: StoredAccount) -> Double {
-        switch account.planType?.lowercased() {
-        case "plus", "team":
-            return 1.0
-        default:
-            return 1.0
-        }
+    private func setUsage(_ usage: UsageInfo, for accountID: UUID) {
+        var nextUsage = usageByAccount
+        nextUsage[accountID] = usage
+        usageByAccount = nextUsage
     }
 
-    private func fiveHourWindowRemaining(for account: StoredAccount) -> Double {
-        guard account.authMode == .chatGPT else {
-            return 0
-        }
+    private func removeUsage(for accountID: UUID) {
+        var nextUsage = usageByAccount
+        nextUsage.removeValue(forKey: accountID)
+        usageByAccount = nextUsage
+    }
 
-        guard let usage = usageByAccount[account.id] else {
-            return 1.0
+    private func setRefreshing(_ isRefreshing: Bool, for accountID: UUID) {
+        var nextRefreshing = refreshingAccountIDs
+        if isRefreshing {
+            nextRefreshing.insert(accountID)
+        } else {
+            nextRefreshing.remove(accountID)
         }
-
-        if usage.error != nil {
-            return 1.0
-        }
-
-        guard let primaryUsedPercent = usage.primaryUsedPercent else {
-            return 1.0
-        }
-
-        return max(0, 1.0 - (primaryUsedPercent / 100.0))
+        refreshingAccountIDs = nextRefreshing
     }
 }
 
