@@ -6,6 +6,9 @@ import SwiftUI
 final class AppUIController: NSObject {
     static let shared = AppUIController()
 
+    private let popoverWidth: CGFloat = 356
+    private let minimumPopoverHeight: CGFloat = 190
+    private let maximumPopoverHeight: CGFloat = 520
     private var model: AppModel?
     private var statusItem: NSStatusItem?
     private let popover = NSPopover()
@@ -92,6 +95,7 @@ final class AppUIController: NSObject {
         guard let model else { return }
 
         popoverHostingController?.rootView = makeMenuBarRootView(for: model)
+        resizePopoverToFitContent()
 
         if accountsWindowController?.window?.isVisible == true {
             accountsHostingController?.rootView = makeAccountsManagementRootView(for: model)
@@ -101,26 +105,14 @@ final class AppUIController: NSObject {
     private func updateStatusItemAppearance() {
         guard let model, let button = statusItem?.button else { return }
 
-        if let image = NSImage(systemSymbolName: model.menuBarSymbolName, accessibilityDescription: nil) {
-            image.isTemplate = true
-            button.image = image
-        } else {
-            button.image = nil
-        }
-
-        let title = model.menuBarLabelText ?? ""
-        if title.isEmpty {
-            button.attributedTitle = NSAttributedString(string: "")
-            button.imagePosition = .imageOnly
-        } else {
-            button.attributedTitle = NSAttributedString(
-                string: title,
-                attributes: [
-                    .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
-                ]
-            )
-            button.imagePosition = .imageLeading
-        }
+        let activeUsage = model.activeAccount.flatMap { model.usageInfo(for: $0.id) }
+        button.image = renderUsageMenuBarIcon(
+            primaryFraction: activeUsage?.error == nil ? activeUsage?.primaryFraction : nil,
+            secondaryFraction: activeUsage?.error == nil ? activeUsage?.secondaryFraction : nil
+        )
+        button.attributedTitle = NSAttributedString(string: "")
+        button.imagePosition = .imageOnly
+        button.toolTip = model.activeAccount?.name ?? "Codex Switcher Menubar"
     }
 
     @objc private func togglePopover(_ sender: AnyObject?) {
@@ -136,7 +128,7 @@ final class AppUIController: NSObject {
         }
 
         NSApp.activate(ignoringOtherApps: true)
-        popover.contentSize = NSSize(width: 380, height: 460)
+        resizePopoverToFitContent()
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         focusPopoverWindow()
     }
@@ -145,7 +137,7 @@ final class AppUIController: NSObject {
         AnyView(
             MenuBarContentView()
                 .environmentObject(model)
-                .frame(width: 380)
+                .frame(width: popoverWidth)
         )
     }
 
@@ -162,6 +154,18 @@ final class AppUIController: NSObject {
             NSApp.activate(ignoringOtherApps: true)
             window.makeKey()
             window.makeFirstResponder(window.contentView)
+            self?.resizePopoverToFitContent()
         }
+    }
+
+    private func resizePopoverToFitContent() {
+        guard let view = popoverHostingController?.view else {
+            return
+        }
+
+        view.layoutSubtreeIfNeeded()
+        let fittingSize = view.fittingSize
+        let targetHeight = min(max(fittingSize.height, minimumPopoverHeight), maximumPopoverHeight)
+        popover.contentSize = NSSize(width: popoverWidth, height: targetHeight)
     }
 }

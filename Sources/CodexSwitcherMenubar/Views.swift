@@ -1,25 +1,6 @@
 import AppKit
 import SwiftUI
 
-struct MenuBarLabelView: View {
-    @EnvironmentObject private var model: AppModel
-
-    var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: model.menuBarSymbolName)
-                .symbolRenderingMode(.hierarchical)
-
-            if let label = model.menuBarLabelText, !label.isEmpty {
-                Text(label)
-                    .font(.system(size: 12, weight: .semibold))
-                    .monospacedDigit()
-                    .lineLimit(1)
-                    .contentTransition(.numericText())
-            }
-        }
-    }
-}
-
 struct MenuBarContentView: View {
     @EnvironmentObject private var model: AppModel
 
@@ -27,76 +8,39 @@ struct MenuBarContentView: View {
         Group {
             if model.isInitialMenuLoadInProgress {
                 InitialMenuLoadingView(accountCount: model.accounts.count)
+            } else if model.accounts.isEmpty {
+                EmptyMenuBarStateView()
+                    .environmentObject(model)
             } else {
                 VStack(alignment: .leading, spacing: 10) {
-                    if let flashMessage = model.flashMessage {
-                        FlashMessageView(message: flashMessage)
-                    }
+                    Text("Codex Usage")
+                        .font(.headline)
 
-                    if model.accounts.isEmpty {
-                        emptyState
-                    } else {
-                        ScrollView {
-                            VStack(spacing: 10) {
-                                ForEach(model.accounts) { account in
-                                    AccountSwitchRow(account: account)
-                                }
-                            }
-                            .padding(.top, 1)
-                            .animation(.snappy(duration: 0.2), value: model.activeAccount?.id)
+                    AccountTabStrip(accounts: model.accounts)
+
+                    if let selectedAccount = model.selectedAccount {
+                        SelectedAccountHeader(account: selectedAccount)
+                        SelectedAccountUsageView(account: selectedAccount)
+
+                        Divider()
+
+                        UsageHistoryChartView(points: model.usageHistoryByAccount[selectedAccount.id] ?? [])
+
+                        if let flashMessage = model.flashMessage {
+                            Divider()
+                            FlashMessageView(message: flashMessage)
                         }
-                        .frame(minHeight: menuAccountListMinHeight, maxHeight: 420)
+
+                        Divider()
+
+                        FooterActionBar(account: selectedAccount)
                     }
-
-                    footerActions
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
-        .padding(14)
+        .padding(10)
         .background(.regularMaterial)
-    }
-
-    private var menuAccountListMinHeight: CGFloat {
-        CGFloat(min(max(model.accounts.count, 1), 3)) * 118
-    }
-
-    private var emptyState: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Import your first account to get started.")
-                .font(.body)
-
-            Button("Manage Accounts") {
-                AppUIController.shared.showAccountsWindow()
-            }
-            .buttonStyle(.borderedProminent)
-        }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(Color(nsColor: .controlBackgroundColor))
-        )
-    }
-
-    private var footerActions: some View {
-        HStack(spacing: 4) {
-            MenuActionButton(systemImage: "gearshape", helpText: "Manage Accounts") {
-                AppUIController.shared.showAccountsWindow()
-            }
-
-            MenuActionButton(systemImage: "arrow.clockwise", helpText: "Refresh Usage", isBusy: model.isRefreshingAll) {
-                Task {
-                    await model.refreshAllUsage()
-                }
-            }
-            .disabled(model.accounts.isEmpty || model.isRefreshingAll)
-
-            MenuActionButton(systemImage: "power", helpText: "Quit") {
-                NSApp.terminate(nil)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .trailing)
-        .padding(.top, 1)
     }
 }
 
@@ -117,71 +61,258 @@ struct InitialMenuLoadingView: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
         }
-        .frame(width: 352)
-        .frame(minHeight: 168)
+        .frame(width: 332)
+        .frame(minHeight: 160)
     }
 
     private var loadingSubtitle: String {
         if accountCount > 0 {
-            return "Refreshing usage and preparing \(accountCount) account\(accountCount == 1 ? "" : "s")."
+            return "Preparing \(accountCount) account\(accountCount == 1 ? "" : "s") and refreshing usage."
         }
         return "Preparing your menu bar workspace."
     }
 }
 
-struct AccountSwitchRow: View {
+struct EmptyMenuBarStateView: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Codex Usage")
+                .font(.headline)
+
+            Text("Add your first account to get started.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+
+            Button("Add Account") {
+                AppUIController.shared.showAccountsWindow()
+            }
+            .buttonStyle(.borderedProminent)
+        }
+        .frame(width: 332, alignment: .leading)
+        .padding(.vertical, 8)
+    }
+}
+
+struct AccountTabStrip: View {
+    let accounts: [StoredAccount]
+
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(accounts) { account in
+                    Button {
+                        model.selectAccount(account.id)
+                    } label: {
+                        HStack(spacing: 6) {
+                            Text(account.name)
+                                .lineLimit(1)
+
+                            if model.isActive(account.id) {
+                                Circle()
+                                    .fill(Color.green)
+                                    .frame(width: 6, height: 6)
+                            }
+                        }
+                        .font(.caption.weight(model.isSelected(account.id) ? .semibold : .regular))
+                        .foregroundStyle(model.isSelected(account.id) ? .primary : .secondary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(
+                            Capsule(style: .continuous)
+                                .fill(
+                                    model.isSelected(account.id)
+                                        ? Color.accentColor.opacity(0.14)
+                                        : Color(nsColor: .controlBackgroundColor)
+                                )
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.vertical, 1)
+        }
+    }
+}
+
+struct SelectedAccountHeader: View {
     let account: StoredAccount
 
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
-        let isActive = model.isActive(account.id)
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Text(account.name)
+                        .font(.title3.weight(.semibold))
 
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text(account.name)
-                    .font(.body.weight(.medium))
-
-                if let email = account.email, !email.isEmpty {
-                    Text(email)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+                    if let planBadge = account.planBadge {
+                        PlanBadge(text: planBadge)
+                    }
                 }
 
-                if isActive {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.caption)
-                        .foregroundStyle(.green)
-                        .symbolEffect(.bounce, value: isActive)
-                }
+                Text(account.subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
 
-                Spacer(minLength: 8)
+            Spacer(minLength: 12)
 
-                Button(isActive ? "Active" : "Switch") {
+            if model.isActive(account.id) {
+                Label("Active", systemImage: "checkmark.circle.fill")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.green)
+            } else {
+                Button("Activate") {
                     Task {
                         await model.activateAccount(account.id)
                     }
                 }
-                .applySwitcherButtonStyle(isProminent: !isActive)
-                .controlSize(.mini)
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
                 .disabled(model.switchingAccountID == account.id)
             }
-
-            CompactUsageStack(usage: model.usageInfo(for: account.id), authMode: account.authMode)
         }
-        .padding(10)
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Color(nsColor: .controlBackgroundColor))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(isActive ? Color.accentColor.opacity(0.28) : .clear, lineWidth: 1)
-        )
-        .shadow(color: isActive ? Color.accentColor.opacity(0.08) : .clear, radius: 8, y: 3)
-        .animation(.snappy(duration: 0.2), value: isActive)
+    }
+}
+
+struct SelectedAccountUsageView: View {
+    let account: StoredAccount
+
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        let usage = model.usageInfo(for: account.id)
+
+        VStack(alignment: .leading, spacing: 10) {
+            if account.authMode == .apiKey {
+                Label("This account needs to be re-added with ChatGPT sign-in.", systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                UsageBucketPanelRow(
+                    label: "5-Hour Window",
+                    percent: usage?.error == nil ? usage?.primaryUsedPercent : nil,
+                    resetAt: usage?.primaryResetsAt
+                )
+
+                UsageBucketPanelRow(
+                    label: "7-Day Window",
+                    percent: usage?.error == nil ? usage?.secondaryUsedPercent : nil,
+                    resetAt: usage?.secondaryResetsAt
+                )
+
+                if let error = usage?.error {
+                    Label(error, systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+            }
+        }
+    }
+}
+
+struct UsageBucketPanelRow: View {
+    let label: String
+    let percent: Double?
+    let resetAt: Int?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(label)
+                    .font(.subheadline)
+
+                Spacer()
+
+                Text(percentText)
+                    .font(.subheadline)
+                    .monospacedDigit()
+            }
+
+            ProgressView(value: progressFraction, total: 1.0)
+                .tint(colorForUsageFraction(progressFraction))
+
+            if let resetAt {
+                Text("Resets \(RelativeTimeFormatter.string(fromUnix: resetAt))")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var percentText: String {
+        guard let percent else {
+            return "—"
+        }
+        return "\(Int(round(percent)))%"
+    }
+
+    private var progressFraction: Double {
+        guard let percent else {
+            return 0
+        }
+        return min(max(percent / 100, 0), 1)
+    }
+}
+
+struct FooterActionBar: View {
+    let account: StoredAccount
+
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if let usage = model.usageInfo(for: account.id) {
+                Text("Updated \(usage.lastUpdatedAt, style: .relative) ago")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            FooterIconButton(systemImage: "gearshape", helpText: "Manage Accounts") {
+                AppUIController.shared.showAccountsWindow()
+            }
+
+            FooterIconButton(
+                systemImage: model.isRefreshingAll ? "arrow.clockwise.circle.fill" : "arrow.clockwise",
+                helpText: "Refresh"
+            ) {
+                Task {
+                    await model.refreshAllUsage()
+                }
+            }
+            .disabled(model.accounts.isEmpty || model.isRefreshingAll)
+
+            FooterIconButton(systemImage: "power", helpText: "Quit") {
+                NSApp.terminate(nil)
+            }
+            .foregroundStyle(.secondary)
+        }
+    }
+}
+
+struct FooterIconButton: View {
+    let systemImage: String
+    let helpText: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 11, weight: .semibold))
+                .frame(width: 18, height: 18)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(helpText)
     }
 }
 
@@ -189,8 +320,6 @@ struct AccountsManagementView: View {
     @EnvironmentObject private var model: AppModel
 
     @State private var newAccountName = ""
-    @State private var apiKey = ""
-    @State private var pastedAuthJSON = ""
 
     var body: some View {
         ScrollView {
@@ -233,7 +362,7 @@ struct AccountsManagementView: View {
                             ContentUnavailableView(
                                 "No Accounts Yet",
                                 systemImage: "person.crop.circle.badge.plus",
-                                description: Text("Import a `.cswf` export, import an auth.json file, or add an API key account.")
+                                description: Text("Add a ChatGPT account, or import an existing `.cswf` export or `auth.json`.")
                             )
                         } else {
                             LazyVStack(spacing: 12) {
@@ -257,123 +386,95 @@ struct AccountsManagementView: View {
                     .font(.headline)
 
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("From Original Codex Switcher")
-                        .font(.subheadline.weight(.semibold))
+                    Text("Add a ChatGPT subscription account with the official OAuth flow.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
 
-                    Button("Import .cswf Export…") {
-                        _ = model.importCodexSwitcherFullExport()
+                    TextField("Account name", text: $newAccountName)
+                        .textFieldStyle(.roundedBorder)
+
+                    Button("Add Account with ChatGPT") {
+                        model.startOAuthAddAccount(named: newAccountName)
                     }
                     .buttonStyle(.borderedProminent)
-
-                    Text("Imports the encrypted full export created by the original desktop app.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    .disabled(newAccountName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.pendingOAuthLogin != nil)
                 }
 
-                Divider()
-
-                TextField("Account name", text: $newAccountName)
-                    .textFieldStyle(.roundedBorder)
-
-                HStack {
-                    Button("Import Current auth.json") {
-                        if model.importCurrentAccount(named: newAccountName) {
-                            clearDrafts(keepAPIKey: true, keepAuthJSON: true)
-                        }
-                    }
-
-                    Button("Choose auth.json File…") {
-                        if model.importFromOpenPanel(named: newAccountName) {
-                            clearDrafts(keepAPIKey: true, keepAuthJSON: true)
-                        }
-                    }
+                if let pendingOAuthLogin = model.pendingOAuthLogin {
+                    OAuthPendingCard(pendingOAuthLogin: pendingOAuthLogin)
                 }
 
                 Divider()
 
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("Quick API Key")
+                    Text("Migrate Existing Accounts")
                         .font(.subheadline.weight(.semibold))
 
+                    Text("Import is still available for accounts you already added elsewhere.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Button("Import .cswf Export…") {
+                        _ = model.importCodexSwitcherFullExport()
+                    }
+                    .buttonStyle(.bordered)
+
                     HStack {
-                        SecureField("OpenAI API key", text: $apiKey)
-                            .textFieldStyle(.roundedBorder)
-
-                        Button("Add API Key Account") {
-                            if model.addAPIKeyAccount(named: newAccountName, apiKey: apiKey) {
-                                clearDrafts(keepAPIKey: false, keepAuthJSON: true)
+                        Button("Import Current auth.json") {
+                            if model.importCurrentAccount(named: newAccountName) {
+                                clearDrafts()
                             }
                         }
-                        .buttonStyle(.bordered)
-                    }
-                }
 
-                DisclosureGroup("Paste auth.json manually") {
-                    VStack(alignment: .leading, spacing: 10) {
-                        TextEditor(text: $pastedAuthJSON)
-                            .font(.system(.body, design: .monospaced))
-                            .frame(minHeight: 160)
-                            .padding(8)
-                            .background(
-                                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                    .fill(Color(nsColor: .textBackgroundColor))
-                            )
-
-                        HStack {
-                            Spacer()
-
-                            Button("Import Pasted auth.json") {
-                                if model.importPastedAuthJSON(named: newAccountName, json: pastedAuthJSON) {
-                                    clearDrafts(keepAPIKey: true, keepAuthJSON: false)
-                                }
+                        Button("Choose auth.json File…") {
+                            if model.importFromOpenPanel(named: newAccountName) {
+                                clearDrafts()
                             }
                         }
                     }
-                    .padding(.top, 8)
                 }
             }
             .padding(8)
         }
     }
 
-    private func clearDrafts(keepAPIKey: Bool, keepAuthJSON: Bool) {
+    private func clearDrafts() {
         newAccountName = ""
-        if !keepAPIKey {
-            apiKey = ""
-        }
-        if !keepAuthJSON {
-            pastedAuthJSON = ""
-        }
     }
 }
 
-struct MenuActionButton: View {
-    @Environment(\.isEnabled) private var isEnabled
+struct OAuthPendingCard: View {
+    let pendingOAuthLogin: PendingOAuthLoginState
 
-    let systemImage: String
-    let helpText: String
-    var isBusy = false
-    let action: () -> Void
+    @EnvironmentObject private var model: AppModel
 
     var body: some View {
-        Button(action: action) {
-            Group {
-                if isBusy {
-                    ProgressView()
-                        .controlSize(.mini)
-                } else {
-                    Image(systemName: systemImage)
-                        .font(.system(size: 10, weight: .medium))
+        VStack(alignment: .leading, spacing: 10) {
+            Label("Waiting for browser sign-in", systemImage: "globe")
+                .font(.subheadline.weight(.semibold))
+
+            Text("A ChatGPT login window was opened for `\(pendingOAuthLogin.accountName)`. Finish the login there and this account will be added automatically.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 10) {
+                Button("Open Browser Again") {
+                    model.reopenOAuthBrowser()
                 }
+                .buttonStyle(.bordered)
+
+                Button("Cancel") {
+                    model.cancelOAuthAddAccount()
+                }
+                .buttonStyle(.borderless)
             }
-            .frame(width: 12, height: 12)
-            .foregroundStyle(.secondary)
-            .padding(1)
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .opacity(isEnabled ? 1 : 0.45)
-        .help(helpText)
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor))
+        )
     }
 }
 
@@ -409,13 +510,8 @@ struct ManagedAccountRow: View {
                     }
 
                     HStack(spacing: 8) {
-                        if let email = account.email, !email.isEmpty {
-                            Text(email)
-                                .foregroundStyle(.secondary)
-                        } else {
-                            Text(account.subtitle)
-                                .foregroundStyle(.secondary)
-                        }
+                        Text(account.subtitle)
+                            .foregroundStyle(.secondary)
 
                         if let planBadge = account.planBadge {
                             PlanBadge(text: planBadge)
@@ -483,123 +579,21 @@ struct UsageSummaryView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
-                    if let primaryPercent = usage.primaryUsedPercent {
-                        UsageMetricRow(
-                            title: usage.primaryWindowMinutes == 300 ? "5-hour window" : "Primary window",
-                            percent: primaryPercent,
-                            fraction: usage.primaryFraction,
-                            resetAt: usage.primaryResetsAt
-                        )
-                    }
+                    UsageBucketPanelRow(
+                        label: usage.primaryWindowMinutes == 300 ? "5-Hour Window" : "Primary Window",
+                        percent: usage.primaryUsedPercent,
+                        resetAt: usage.primaryResetsAt
+                    )
 
-                    if let secondaryPercent = usage.secondaryUsedPercent {
-                        UsageMetricRow(
-                            title: usage.secondaryWindowMinutes == 10080 ? "Weekly window" : "Secondary window",
-                            percent: secondaryPercent,
-                            fraction: usage.secondaryFraction,
-                            resetAt: usage.secondaryResetsAt
-                        )
-                    }
+                    UsageBucketPanelRow(
+                        label: usage.secondaryWindowMinutes == 10080 ? "7-Day Window" : "Secondary Window",
+                        percent: usage.secondaryUsedPercent,
+                        resetAt: usage.secondaryResetsAt
+                    )
                 }
             } else {
                 Label("No usage fetched yet", systemImage: "clock")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-}
-
-struct UsageMetricRow: View {
-    let title: String
-    let percent: Double
-    let fraction: Double?
-    let resetAt: Int?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(metricTitle)
-                .font(.caption.weight(.medium))
-                .foregroundStyle(.secondary)
-
-            HStack(spacing: 10) {
-                ProgressView(value: fraction ?? 0)
-                    .progressViewStyle(.linear)
-                    .tint(percent > 85 ? .orange : .blue)
-
-                Text("\(Int(percent.rounded()))%")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    private var metricTitle: String {
-        if let resetAt {
-            return "\(title) · resets \(RelativeTimeFormatter.string(fromUnix: resetAt))"
-        }
-        return title
-    }
-}
-
-struct CompactUsageStack: View {
-    let usage: UsageInfo?
-    let authMode: AuthMode
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if let usage, usage.error == nil {
-                if let primary = usage.primaryUsedPercent {
-                    UsageMetricRow(
-                        title: usage.primaryWindowMinutes == 300 ? "5-hour window" : "Primary window",
-                        percent: primary,
-                        fraction: usage.primaryFraction,
-                        resetAt: usage.primaryResetsAt
-                    )
-                } else {
-                    UsagePlaceholderRow(text: "5-hour window")
-                }
-
-                if let secondary = usage.secondaryUsedPercent {
-                    UsageMetricRow(
-                        title: usage.secondaryWindowMinutes == 10080 ? "Weekly window" : "Secondary window",
-                        percent: secondary,
-                        fraction: usage.secondaryFraction,
-                        resetAt: usage.secondaryResetsAt
-                    )
-                } else {
-                    UsagePlaceholderRow(text: "Weekly window")
-                }
-            } else if let usage, let error = usage.error {
-                Text(error)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-            } else {
-                Text(authMode == .apiKey ? "Usage is unavailable for API key accounts." : "Usage not loaded yet.")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-}
-
-struct UsagePlaceholderRow: View {
-    let text: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(text)
-                .font(.caption.weight(.medium))
-                .foregroundStyle(.secondary)
-
-            HStack(spacing: 10) {
-                ProgressView(value: 0)
-                    .progressViewStyle(.linear)
-                    .tint(.secondary.opacity(0.35))
-
-                Text("—")
-                    .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
         }
@@ -629,8 +623,10 @@ struct FlashMessageView: View {
         HStack(spacing: 10) {
             Image(systemName: message.isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
                 .foregroundStyle(message.isError ? .orange : .green)
+
             Text(message.text)
                 .font(.caption)
+                .lineLimit(2)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
@@ -666,5 +662,16 @@ private struct SwitcherButtonStyleModifier: ViewModifier {
 private extension View {
     func applySwitcherButtonStyle(isProminent: Bool) -> some View {
         modifier(SwitcherButtonStyleModifier(isProminent: isProminent))
+    }
+}
+
+private func colorForUsageFraction(_ fraction: Double) -> Color {
+    switch fraction {
+    case ..<0.60:
+        return .green
+    case 0.60..<0.80:
+        return .yellow
+    default:
+        return .red
     }
 }

@@ -268,6 +268,12 @@ struct FlashMessage: Identifiable, Equatable {
     var isError: Bool
 }
 
+struct PendingOAuthLoginState: Equatable {
+    var accountName: String
+    var authURL: URL
+    var callbackPort: UInt16
+}
+
 struct AppError: LocalizedError, Sendable {
     var message: String
 

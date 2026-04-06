@@ -23,6 +23,10 @@ enum AppPaths {
         storageDirectory.appendingPathComponent("accounts.json")
     }
 
+    static var usageHistoryFile: URL {
+        storageDirectory.appendingPathComponent("usage-history.json")
+    }
+
     static var codexHome: URL {
         if let explicit = ProcessInfo.processInfo.environment["CODEX_HOME"], !explicit.isEmpty {
             return URL(fileURLWithPath: explicit, isDirectory: true)
@@ -449,12 +453,12 @@ enum AuthFileService {
         let auth = try JSONCoding.decoder().decode(AuthJSON.self, from: data)
 
         if let apiKey = auth.openAIAPIKey, !apiKey.isEmpty {
-            return StoredAccount.makeAPIKey(name: name, apiKey: apiKey)
+            throw AppError(message: "API-key auth files are not supported here. Add a ChatGPT subscription account instead.")
         }
 
         guard let tokens = auth.tokens else {
             throw CocoaError(.fileReadCorruptFile, userInfo: [
-                NSDebugDescriptionErrorKey: "auth.json is missing both OPENAI_API_KEY and tokens."
+                NSDebugDescriptionErrorKey: "auth.json is missing ChatGPT tokens."
             ])
         }
 

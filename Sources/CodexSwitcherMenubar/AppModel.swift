@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 @MainActor
@@ -5,7 +6,10 @@ final class AppModel: ObservableObject {
     static let shared = AppModel()
 
     @Published private(set) var store = AccountsStore()
+    @Published private(set) var selectedAccountID: UUID?
+    @Published private(set) var pendingOAuthLogin: PendingOAuthLoginState?
     @Published private(set) var usageByAccount: [UUID: UsageInfo] = [:]
+    @Published private(set) var usageHistoryByAccount: [UUID: [UsageHistoryPoint]] = [:]
     @Published private(set) var refreshingAccountIDs: Set<UUID> = []
     @Published private(set) var processStatus = CodexProcessStatus()
     @Published private(set) var isInitialMenuLoadInProgress = true
@@ -16,10 +20,12 @@ final class AppModel: ObservableObject {
     private let minimumInitialLoadingDelay: TimeInterval = 0.35
     private var clearMessageTask: Task<Void, Never>?
     private var startupRefreshTask: Task<Void, Never>?
+    private var oauthCompletionTask: Task<Void, Never>?
     private var hasStartedAppStartup = false
     private var hasStartedStartupRefresh = false
     private let shouldSkipStartupUsageRefresh = ProcessInfo.processInfo.environment["CODEX_SWITCHER_SKIP_STARTUP_REFRESH"] == "1"
         || ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+    private var oauthLoginSession: OAuthLoginSession?
 
     var accounts: [StoredAccount] {
         store.accounts.sorted { lhs, rhs in
@@ -39,6 +45,14 @@ final class AppModel: ObservableObject {
             return nil
         }
         return store.accounts.first(where: { $0.id == activeAccountID })
+    }
+
+    var selectedAccount: StoredAccount? {
+        let selectedID = selectedAccountID ?? store.activeAccountID
+        guard let selectedID else {
+            return store.accounts.first
+        }
+        return store.accounts.first(where: { $0.id == selectedID }) ?? store.accounts.first
     }
 
     var menuBarSymbolName: String {
@@ -76,6 +90,8 @@ final class AppModel: ObservableObject {
 
     init() {
         loadStore()
+        loadUsageHistory()
+        syncSelectionWithStore(preferActive: true)
         scheduleInitialMenuLoadingDismissal()
         DispatchQueue.main.async { [weak self] in
             self?.startStartupRefreshIfNeeded()
@@ -90,12 +106,40 @@ final class AppModel: ObservableObject {
         usageByAccount[accountID]
     }
 
+    func usageHistoryPoints(for accountID: UUID, range: UsageHistoryRange) -> [UsageHistoryPoint] {
+        UsageHistoryStore.downsampledPoints(
+            for: accountID,
+            range: range,
+            historyByAccount: usageHistoryByAccount
+        )
+    }
+
     func isRefreshing(_ accountID: UUID) -> Bool {
         refreshingAccountIDs.contains(accountID)
     }
 
     func isActive(_ accountID: UUID) -> Bool {
         store.activeAccountID == accountID
+    }
+
+    func isSelected(_ accountID: UUID) -> Bool {
+        selectedAccount?.id == accountID
+    }
+
+    func selectAccount(_ accountID: UUID) {
+        guard store.accounts.contains(where: { $0.id == accountID }) else {
+            return
+        }
+
+        selectedAccountID = accountID
+
+        if usageByAccount[accountID] == nil,
+           !refreshingAccountIDs.contains(accountID)
+        {
+            Task { @MainActor [weak self] in
+                await self?.refreshUsage(for: accountID, announce: false)
+            }
+        }
     }
 
     func refreshProcessStatus() async {
@@ -127,7 +171,6 @@ final class AppModel: ObservableObject {
         guard store.activeAccountID != accountID else {
             do {
                 try syncAuthFile(for: store)
-                postMessage("Already using \(store.accounts[accountIndex].name).")
             } catch {
                 postMessage(error.localizedDescription, isError: true)
             }
@@ -139,33 +182,28 @@ final class AppModel: ObservableObject {
 
         let previousStore = store
         let previousActiveAccount = activeAccount
-        let wasCodexRunning = processStatus.hasRunningCodex
         var updatedStore = store
         updatedStore.activeAccountID = accountID
         updatedStore.accounts[accountIndex].lastUsedAt = Date()
         let normalizedUpdatedStore = normalizedStore(from: updatedStore)
 
         store = normalizedUpdatedStore
+        syncSelectionWithStore(preferActive: true)
 
         do {
             try syncAuthFile(for: normalizedUpdatedStore)
             try LocalStore.save(normalizedUpdatedStore)
 
-            guard let activeIndex = normalizedUpdatedStore.accounts.firstIndex(where: { $0.id == accountID }) else {
+            guard normalizedUpdatedStore.accounts.contains(where: { $0.id == accountID }) else {
                 throw AppError(message: "Switched account could not be found after saving.")
             }
 
             Task { @MainActor [weak self] in
                 await self?.refreshProcessStatus()
             }
-
-            if wasCodexRunning {
-                postMessage("Switched while Codex is running. New shells will use the new account.")
-            } else {
-                postMessage("Switched to \(normalizedUpdatedStore.accounts[activeIndex].name).")
-            }
         } catch {
             store = previousStore
+            syncSelectionWithStore(preferActive: true)
             restoreAuthFile(from: previousActiveAccount)
             postMessage(error.localizedDescription, isError: true)
         }
@@ -182,6 +220,7 @@ final class AppModel: ObservableObject {
         do {
             let result = try await UsageService.fetchUsage(for: account)
             replaceAccountIfNeeded(result.account)
+            recordUsageHistorySnapshot(result.usage, for: accountID)
             setUsage(result.usage, for: accountID)
             if announce {
                 postMessage("Usage refreshed for \(result.account.name).")
@@ -208,6 +247,51 @@ final class AppModel: ObservableObject {
 
         if announce {
             postMessage("Usage refreshed for \(accounts.count) account\(accounts.count == 1 ? "" : "s").")
+        }
+    }
+
+    func startOAuthAddAccount(named rawName: String) {
+        let name = rawName.trimmed
+        guard validateNewAccountName(name) else { return }
+
+        cancelOAuthAddAccount(silent: true)
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+
+            do {
+                let session = try await OAuthLoginService.startLogin(accountName: name)
+                oauthLoginSession = session
+                pendingOAuthLogin = PendingOAuthLoginState(
+                    accountName: name,
+                    authURL: session.authURL,
+                    callbackPort: session.callbackPort
+                )
+
+                NSWorkspace.shared.open(session.authURL)
+                await waitForOAuthAddAccountCompletion(session)
+            } catch {
+                postMessage(error.localizedDescription, isError: true)
+            }
+        }
+    }
+
+    func reopenOAuthBrowser() {
+        guard let authURL = pendingOAuthLogin?.authURL else {
+            return
+        }
+        NSWorkspace.shared.open(authURL)
+    }
+
+    func cancelOAuthAddAccount(silent: Bool = false) {
+        oauthCompletionTask?.cancel()
+        oauthCompletionTask = nil
+        oauthLoginSession?.cancel()
+        oauthLoginSession = nil
+        pendingOAuthLogin = nil
+
+        if !silent {
+            flashMessage = nil
         }
     }
 
@@ -304,23 +388,10 @@ final class AppModel: ObservableObject {
     }
 
     func addAPIKeyAccount(named rawName: String, apiKey rawAPIKey: String) -> Bool {
-        let name = rawName.trimmed
-        guard validateNewAccountName(name) else { return false }
-
-        let apiKey = rawAPIKey.trimmed
-        guard !apiKey.isEmpty else {
-            postMessage("Add an API key before creating the account.", isError: true)
-            return false
-        }
-
-        do {
-            try insertAccount(.makeAPIKey(name: name, apiKey: apiKey))
-            postMessage("Added API key account \(name).")
-            return true
-        } catch {
-            postMessage(error.localizedDescription, isError: true)
-            return false
-        }
+        _ = rawName
+        _ = rawAPIKey
+        postMessage("This app only supports ChatGPT subscription accounts.", isError: true)
+        return false
     }
 
     func renameAccount(_ accountID: UUID, to rawName: String) -> Bool {
@@ -347,6 +418,7 @@ final class AppModel: ObservableObject {
 
         do {
             store = try persistedStore(from: updatedStore)
+            syncSelectionWithStore()
             postMessage("Renamed account to \(newName).")
             return true
         } catch {
@@ -370,7 +442,9 @@ final class AppModel: ObservableObject {
         do {
             let persistedStore = try commitStoreChange(updatedStore, syncActiveAuth: true)
             store = persistedStore
+            syncSelectionWithStore(preferActive: true)
             removeUsage(for: accountID)
+            removeUsageHistory(for: accountID)
             postMessage("Deleted \(deleted.name).")
         } catch {
             postMessage(error.localizedDescription, isError: true)
@@ -408,6 +482,42 @@ final class AppModel: ObservableObject {
         } catch {
             store = AccountsStore()
             postMessage("Failed to load saved accounts: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    private func loadUsageHistory() {
+        do {
+            usageHistoryByAccount = try UsageHistoryStore.load()
+        } catch {
+            usageHistoryByAccount = [:]
+        }
+    }
+
+    private func waitForOAuthAddAccountCompletion(_ session: OAuthLoginSession) async {
+        oauthCompletionTask?.cancel()
+        oauthCompletionTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+
+            do {
+                let account = try await session.resultTask.value
+                guard oauthLoginSession === session else { return }
+
+                try insertAccount(account)
+                pendingOAuthLogin = nil
+                oauthLoginSession = nil
+                await activateAccount(account.id)
+                await refreshUsage(for: account.id, announce: false)
+            } catch {
+                guard oauthLoginSession === session else { return }
+
+                pendingOAuthLogin = nil
+                oauthLoginSession = nil
+
+                let message = error.localizedDescription
+                if message != "OAuth login cancelled." {
+                    postMessage(message, isError: true)
+                }
+            }
         }
     }
 
@@ -468,6 +578,7 @@ final class AppModel: ObservableObject {
         }
 
         store = try commitStoreChange(updatedStore, syncActiveAuth: true)
+        syncSelectionWithStore()
 
         return ImportMergeSummary(
             totalInPayload: totalInPayload,
@@ -491,6 +602,7 @@ final class AppModel: ObservableObject {
 
         let persistedStore = try commitStoreChange(updatedStore, syncActiveAuth: updatedStore.activeAccountID == account.id)
         store = persistedStore
+        syncSelectionWithStore()
     }
 
     private func replaceAccountIfNeeded(_ updatedAccount: StoredAccount) {
@@ -508,6 +620,7 @@ final class AppModel: ObservableObject {
         do {
             let persistedStore = try commitStoreChange(updatedStore, syncActiveAuth: updatedStore.activeAccountID == updatedAccount.id)
             store = persistedStore
+            syncSelectionWithStore()
         } catch {
             postMessage(error.localizedDescription, isError: true)
         }
@@ -609,6 +722,21 @@ final class AppModel: ObservableObject {
         return store.accounts.first(where: { $0.id == activeAccountID })
     }
 
+    private func syncSelectionWithStore(preferActive: Bool = false) {
+        if preferActive, let activeAccountID = store.activeAccountID {
+            selectedAccountID = activeAccountID
+            return
+        }
+
+        if let selectedAccountID,
+           store.accounts.contains(where: { $0.id == selectedAccountID })
+        {
+            return
+        }
+
+        selectedAccountID = store.activeAccountID ?? store.accounts.first?.id
+    }
+
     private func postMessage(_ text: String, isError: Bool = false) {
         clearMessageTask?.cancel()
         flashMessage = FlashMessage(text: text, isError: isError)
@@ -632,6 +760,28 @@ final class AppModel: ObservableObject {
         var nextUsage = usageByAccount
         nextUsage.removeValue(forKey: accountID)
         usageByAccount = nextUsage
+    }
+
+    private func recordUsageHistorySnapshot(_ usage: UsageInfo, for accountID: UUID) {
+        let updatedHistory = UsageHistoryStore.record(
+            usage: usage,
+            for: accountID,
+            historyByAccount: usageHistoryByAccount
+        )
+
+        guard updatedHistory != usageHistoryByAccount else {
+            return
+        }
+
+        usageHistoryByAccount = updatedHistory
+        try? UsageHistoryStore.save(updatedHistory)
+    }
+
+    private func removeUsageHistory(for accountID: UUID) {
+        var nextHistory = usageHistoryByAccount
+        nextHistory.removeValue(forKey: accountID)
+        usageHistoryByAccount = nextHistory
+        try? UsageHistoryStore.save(nextHistory)
     }
 
     private func setRefreshing(_ isRefreshing: Bool, for accountID: UUID) {
