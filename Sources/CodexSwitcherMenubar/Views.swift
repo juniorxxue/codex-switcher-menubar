@@ -101,39 +101,51 @@ struct AccountTabStrip: View {
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(accounts) { account in
-                    Button {
-                        model.selectAccount(account.id)
-                    } label: {
-                        HStack(spacing: 6) {
-                            Text(account.name)
-                                .lineLimit(1)
+        ViewThatFits(in: .horizontal) {
+            segmentedPicker
+                .fixedSize(horizontal: true, vertical: false)
 
-                            if model.isActive(account.id) {
-                                Circle()
-                                    .fill(Color.green)
-                                    .frame(width: 6, height: 6)
-                            }
-                        }
-                        .font(.caption.weight(model.isSelected(account.id) ? .semibold : .regular))
-                        .foregroundStyle(model.isSelected(account.id) ? .primary : .secondary)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .background(
-                            Capsule(style: .continuous)
-                                .fill(
-                                    model.isSelected(account.id)
-                                        ? Color.accentColor.opacity(0.14)
-                                        : Color(nsColor: .controlBackgroundColor)
-                                )
-                        )
-                    }
-                    .buttonStyle(.plain)
-                }
+            ScrollView(.horizontal, showsIndicators: false) {
+                segmentedPicker
+                    .fixedSize(horizontal: true, vertical: false)
+                    .padding(.vertical, 1)
             }
-            .padding(.vertical, 1)
+        }
+    }
+
+    private var segmentedPicker: some View {
+        Picker("Account", selection: selectedAccountID) {
+            ForEach(accounts) { account in
+                accountSegmentLabel(for: account)
+                    .tag(account.id)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+    }
+
+    private var selectedAccountID: Binding<UUID> {
+        let fallbackID = accounts.first?.id ?? UUID()
+
+        return Binding(
+            get: { model.selectedAccount?.id ?? fallbackID },
+            set: { model.selectAccount($0) }
+        )
+    }
+
+    @ViewBuilder
+    private func accountSegmentLabel(for account: StoredAccount) -> some View {
+        if model.isActive(account.id) {
+            Label {
+                Text(account.name)
+                    .lineLimit(1)
+            } icon: {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+            }
+        } else {
+            Text(account.name)
+                .lineLimit(1)
         }
     }
 }
