@@ -21,88 +21,43 @@ struct MenuBarLabelView: View {
 }
 
 struct MenuBarContentView: View {
-    @Environment(\.openWindow) private var openWindow
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            header
-
-            if let flashMessage = model.flashMessage {
-                FlashMessageView(message: flashMessage)
-            }
-
-            if model.accounts.isEmpty {
-                emptyState
+        Group {
+            if model.isInitialMenuLoadInProgress {
+                InitialMenuLoadingView(accountCount: model.accounts.count)
             } else {
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("Accounts")
-                        .font(.headline)
-
-                    ScrollView {
-                        VStack(spacing: 10) {
-                            ForEach(model.accounts) { account in
-                                AccountSwitchRow(account: account)
-                            }
-                        }
-                        .padding(.top, 1)
-                        .animation(.snappy(duration: 0.2), value: model.activeAccount?.id)
+                    if let flashMessage = model.flashMessage {
+                        FlashMessageView(message: flashMessage)
                     }
-                    .frame(minHeight: menuAccountListMinHeight, maxHeight: 420)
-                }
 
-                footerActions
+                    if model.accounts.isEmpty {
+                        emptyState
+                    } else {
+                        ScrollView {
+                            VStack(spacing: 10) {
+                                ForEach(model.accounts) { account in
+                                    AccountSwitchRow(account: account)
+                                }
+                            }
+                            .padding(.top, 1)
+                            .animation(.snappy(duration: 0.2), value: model.activeAccount?.id)
+                        }
+                        .frame(minHeight: menuAccountListMinHeight, maxHeight: 420)
+                    }
+
+                    footerActions
+                }
             }
         }
-        .padding(16)
+        .padding(14)
         .background(.regularMaterial)
-        .task {
-            await model.refreshProcessStatus()
-        }
     }
 
     private var menuAccountListMinHeight: CGFloat {
         CGFloat(min(max(model.accounts.count, 1), 3)) * 118
-    }
-
-    private var header: some View {
-        HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Codex Switcher")
-                    .font(.title3.weight(.semibold))
-
-                if model.processStatus.hasRunningCodex {
-                    Label("Codex is running", systemImage: "bolt.horizontal.circle.fill")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                } else if model.activeAccount == nil {
-                    Text("No account selected")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else {
-                    Text("Menu bar edition")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            Spacer()
-
-            Button {
-                Task {
-                    await model.refreshAllUsage()
-                }
-            } label: {
-                if model.isRefreshingAll {
-                    ProgressView()
-                        .controlSize(.small)
-                } else {
-                    Image(systemName: "arrow.clockwise")
-                }
-            }
-            .buttonStyle(.borderless)
-            .help("Refresh usage")
-        }
     }
 
     private var emptyState: some View {
@@ -111,8 +66,7 @@ struct MenuBarContentView: View {
                 .font(.body)
 
             Button("Manage Accounts") {
-                NSApp.activate(ignoringOtherApps: true)
-                openWindow(id: "accounts")
+                AppUIController.shared.showAccountsWindow()
             }
             .buttonStyle(.borderedProminent)
         }
@@ -125,18 +79,53 @@ struct MenuBarContentView: View {
     }
 
     private var footerActions: some View {
-        HStack {
-            Button("Manage Accounts") {
-                NSApp.activate(ignoringOtherApps: true)
-                openWindow(id: "accounts")
+        HStack(spacing: 4) {
+            MenuActionButton(systemImage: "gearshape", helpText: "Manage Accounts") {
+                AppUIController.shared.showAccountsWindow()
             }
 
-            Spacer()
+            MenuActionButton(systemImage: "arrow.clockwise", helpText: "Refresh Usage", isBusy: model.isRefreshingAll) {
+                Task {
+                    await model.refreshAllUsage()
+                }
+            }
+            .disabled(model.accounts.isEmpty || model.isRefreshingAll)
 
-            Button("Quit") {
+            MenuActionButton(systemImage: "power", helpText: "Quit") {
                 NSApp.terminate(nil)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .trailing)
+        .padding(.top, 1)
+    }
+}
+
+struct InitialMenuLoadingView: View {
+    let accountCount: Int
+
+    var body: some View {
+        VStack(spacing: 12) {
+            ProgressView()
+                .controlSize(.regular)
+                .scaleEffect(0.9)
+
+            Text("Loading accounts...")
+                .font(.system(size: 13, weight: .semibold))
+
+            Text(loadingSubtitle)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(width: 352)
+        .frame(minHeight: 168)
+    }
+
+    private var loadingSubtitle: String {
+        if accountCount > 0 {
+            return "Refreshing usage and preparing \(accountCount) account\(accountCount == 1 ? "" : "s")."
+        }
+        return "Preparing your menu bar workspace."
     }
 }
 
@@ -148,8 +137,8 @@ struct AccountSwitchRow: View {
     var body: some View {
         let isActive = model.isActive(account.id)
 
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Text(account.name)
                     .font(.body.weight(.medium))
 
@@ -170,43 +159,28 @@ struct AccountSwitchRow: View {
 
                 Spacer(minLength: 8)
 
-                if model.isRefreshing(account.id) {
-                    ProgressView()
-                        .controlSize(.small)
-                } else {
-                    Button {
-                        Task {
-                            await model.refreshUsage(for: account.id)
-                        }
-                    } label: {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                    .buttonStyle(.borderless)
-                    .help("Refresh usage")
-                }
-
                 Button(isActive ? "Active" : "Switch") {
                     Task {
                         await model.activateAccount(account.id)
                     }
                 }
                 .applySwitcherButtonStyle(isProminent: !isActive)
-                .controlSize(.small)
+                .controlSize(.mini)
                 .disabled(model.switchingAccountID == account.id)
             }
 
             CompactUsageStack(usage: model.usageInfo(for: account.id), authMode: account.authMode)
         }
-        .padding(12)
+        .padding(10)
         .background(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(Color(nsColor: .controlBackgroundColor))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .stroke(isActive ? Color.accentColor.opacity(0.28) : .clear, lineWidth: 1)
         )
-        .shadow(color: isActive ? Color.accentColor.opacity(0.10) : .clear, radius: 10, y: 4)
+        .shadow(color: isActive ? Color.accentColor.opacity(0.08) : .clear, radius: 8, y: 3)
         .animation(.snappy(duration: 0.2), value: isActive)
     }
 }
@@ -221,19 +195,12 @@ struct AccountsManagementView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                HStack(alignment: .top) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Accounts")
-                            .font(.largeTitle.weight(.bold))
-                        Text("Add, rename, refresh, and switch stored Codex accounts.")
-                            .foregroundStyle(.secondary)
-                    }
-
-                    Spacer()
-
+                HStack {
                     Button("Reveal Storage") {
                         model.revealStorageFolder()
                     }
+
+                    Spacer()
 
                     Button("Refresh All Usage") {
                         Task {
@@ -377,6 +344,36 @@ struct AccountsManagementView: View {
         if !keepAuthJSON {
             pastedAuthJSON = ""
         }
+    }
+}
+
+struct MenuActionButton: View {
+    @Environment(\.isEnabled) private var isEnabled
+
+    let systemImage: String
+    let helpText: String
+    var isBusy = false
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Group {
+                if isBusy {
+                    ProgressView()
+                        .controlSize(.mini)
+                } else {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 10, weight: .medium))
+                }
+            }
+            .frame(width: 12, height: 12)
+            .foregroundStyle(.secondary)
+            .padding(1)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .opacity(isEnabled ? 1 : 0.45)
+        .help(helpText)
     }
 }
 

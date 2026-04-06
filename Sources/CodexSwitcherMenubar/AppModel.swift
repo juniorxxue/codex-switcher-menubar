@@ -2,15 +2,24 @@ import Foundation
 
 @MainActor
 final class AppModel: ObservableObject {
+    static let shared = AppModel()
+
     @Published private(set) var store = AccountsStore()
     @Published private(set) var usageByAccount: [UUID: UsageInfo] = [:]
     @Published private(set) var refreshingAccountIDs: Set<UUID> = []
     @Published private(set) var processStatus = CodexProcessStatus()
+    @Published private(set) var isInitialMenuLoadInProgress = true
     @Published private(set) var isRefreshingAll = false
     @Published private(set) var switchingAccountID: UUID?
     @Published var flashMessage: FlashMessage?
 
+    private let minimumInitialLoadingDelay: TimeInterval = 0.35
     private var clearMessageTask: Task<Void, Never>?
+    private var startupRefreshTask: Task<Void, Never>?
+    private var hasStartedAppStartup = false
+    private var hasStartedStartupRefresh = false
+    private let shouldSkipStartupUsageRefresh = ProcessInfo.processInfo.environment["CODEX_SWITCHER_SKIP_STARTUP_REFRESH"] == "1"
+        || ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
 
     var accounts: [StoredAccount] {
         store.accounts.sorted { lhs, rhs in
@@ -67,8 +76,9 @@ final class AppModel: ObservableObject {
 
     init() {
         loadStore()
-        Task {
-            await bootstrap()
+        scheduleInitialMenuLoadingDismissal()
+        DispatchQueue.main.async { [weak self] in
+            self?.startStartupRefreshIfNeeded()
         }
     }
 
@@ -95,36 +105,68 @@ final class AppModel: ObservableObject {
         processStatus = status
     }
 
+    func start() {
+        guard !hasStartedAppStartup else {
+            return
+        }
+
+        hasStartedAppStartup = true
+        syncActiveAuthFileWithStore()
+
+        Task { @MainActor [weak self] in
+            await self?.refreshProcessStatus()
+        }
+    }
+
     func activateAccount(_ accountID: UUID) async {
         guard let accountIndex = store.accounts.firstIndex(where: { $0.id == accountID }) else {
             postMessage("That account no longer exists.", isError: true)
             return
         }
 
+        guard store.activeAccountID != accountID else {
+            do {
+                try syncAuthFile(for: store)
+                postMessage("Already using \(store.accounts[accountIndex].name).")
+            } catch {
+                postMessage(error.localizedDescription, isError: true)
+            }
+            return
+        }
+
         switchingAccountID = accountID
         defer { switchingAccountID = nil }
 
-        await refreshProcessStatus()
-
+        let previousStore = store
+        let previousActiveAccount = activeAccount
+        let wasCodexRunning = processStatus.hasRunningCodex
         var updatedStore = store
         updatedStore.activeAccountID = accountID
         updatedStore.accounts[accountIndex].lastUsedAt = Date()
+        let normalizedUpdatedStore = normalizedStore(from: updatedStore)
+
+        store = normalizedUpdatedStore
 
         do {
-            let persistedStore = try persistedStore(from: updatedStore)
-            guard let activeIndex = persistedStore.accounts.firstIndex(where: { $0.id == accountID }) else {
+            try syncAuthFile(for: normalizedUpdatedStore)
+            try LocalStore.save(normalizedUpdatedStore)
+
+            guard let activeIndex = normalizedUpdatedStore.accounts.firstIndex(where: { $0.id == accountID }) else {
                 throw AppError(message: "Switched account could not be found after saving.")
             }
 
-            try AuthFileService.writeCurrentAuth(for: persistedStore.accounts[activeIndex])
-            store = persistedStore
+            Task { @MainActor [weak self] in
+                await self?.refreshProcessStatus()
+            }
 
-            if processStatus.hasRunningCodex {
+            if wasCodexRunning {
                 postMessage("Switched while Codex is running. New shells will use the new account.")
             } else {
-                postMessage("Switched to \(persistedStore.accounts[activeIndex].name).")
+                postMessage("Switched to \(normalizedUpdatedStore.accounts[activeIndex].name).")
             }
         } catch {
+            store = previousStore
+            restoreAuthFile(from: previousActiveAccount)
             postMessage(error.localizedDescription, isError: true)
         }
     }
@@ -152,7 +194,7 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func refreshAllUsage() async {
+    func refreshAllUsage(announce: Bool = true) async {
         guard !accounts.isEmpty else {
             return
         }
@@ -164,7 +206,9 @@ final class AppModel: ObservableObject {
             await refreshUsage(for: account.id, announce: false)
         }
 
-        postMessage("Usage refreshed for \(accounts.count) account\(accounts.count == 1 ? "" : "s").")
+        if announce {
+            postMessage("Usage refreshed for \(accounts.count) account\(accounts.count == 1 ? "" : "s").")
+        }
     }
 
     func importCurrentAccount(named rawName: String) -> Bool {
@@ -324,16 +368,7 @@ final class AppModel: ObservableObject {
         }
 
         do {
-            let persistedStore = try persistedStore(from: updatedStore)
-
-            if let activeAccountID = persistedStore.activeAccountID,
-               let activeAccount = persistedStore.accounts.first(where: { $0.id == activeAccountID })
-            {
-                try AuthFileService.writeCurrentAuth(for: activeAccount)
-            } else {
-                try AuthFileService.clearCurrentAuth()
-            }
-
+            let persistedStore = try commitStoreChange(updatedStore, syncActiveAuth: true)
             store = persistedStore
             removeUsage(for: accountID)
             postMessage("Deleted \(deleted.name).")
@@ -346,10 +381,22 @@ final class AppModel: ObservableObject {
         AppPaths.revealStorageDirectory()
     }
 
-    private func bootstrap() async {
-        await refreshProcessStatus()
-        if !accounts.isEmpty {
-            await refreshAllUsage()
+    private func startStartupRefreshIfNeeded() {
+        guard !shouldSkipStartupUsageRefresh, !hasStartedStartupRefresh, !accounts.isEmpty else {
+            return
+        }
+
+        hasStartedStartupRefresh = true
+        startupRefreshTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.startupRefreshTask = nil }
+            await self.refreshAllUsage(announce: false)
+        }
+    }
+
+    private func scheduleInitialMenuLoadingDismissal() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + minimumInitialLoadingDelay) { [weak self] in
+            self?.isInitialMenuLoadInProgress = false
         }
     }
 
@@ -420,7 +467,7 @@ final class AppModel: ObservableObject {
             }
         }
 
-        store = try persistedStore(from: updatedStore)
+        store = try commitStoreChange(updatedStore, syncActiveAuth: true)
 
         return ImportMergeSummary(
             totalInPayload: totalInPayload,
@@ -442,12 +489,7 @@ final class AppModel: ObservableObject {
             updatedStore.activeAccountID = account.id
         }
 
-        let persistedStore = try persistedStore(from: updatedStore)
-
-        if persistedStore.activeAccountID == account.id {
-            try AuthFileService.writeCurrentAuth(for: account)
-        }
-
+        let persistedStore = try commitStoreChange(updatedStore, syncActiveAuth: updatedStore.activeAccountID == account.id)
         store = persistedStore
     }
 
@@ -464,10 +506,7 @@ final class AppModel: ObservableObject {
         updatedStore.accounts[index] = updatedAccount
 
         do {
-            let persistedStore = try persistedStore(from: updatedStore)
-            if persistedStore.activeAccountID == updatedAccount.id {
-                try AuthFileService.writeCurrentAuth(for: updatedAccount)
-            }
+            let persistedStore = try commitStoreChange(updatedStore, syncActiveAuth: updatedStore.activeAccountID == updatedAccount.id)
             store = persistedStore
         } catch {
             postMessage(error.localizedDescription, isError: true)
@@ -512,6 +551,62 @@ final class AppModel: ObservableObject {
         {
             throw AppError(message: "Import references a missing active account.")
         }
+    }
+
+    private func commitStoreChange(_ updatedStore: AccountsStore, syncActiveAuth: Bool) throws -> AccountsStore {
+        let previousActiveAccount = activeAccount
+        let normalizedStore = normalizedStore(from: updatedStore)
+
+        if syncActiveAuth {
+            try syncAuthFile(for: normalizedStore)
+        }
+
+        do {
+            try LocalStore.save(normalizedStore)
+            return normalizedStore
+        } catch {
+            if syncActiveAuth {
+                restoreAuthFile(from: previousActiveAccount)
+            }
+            throw error
+        }
+    }
+
+    private func normalizedStore(from store: AccountsStore) -> AccountsStore {
+        var normalizedStore = store
+        normalizeStore(&normalizedStore)
+        return normalizedStore
+    }
+
+    private func syncActiveAuthFileWithStore() {
+        do {
+            try syncAuthFile(for: store)
+        } catch {
+            postMessage("Failed to sync active auth: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    private func syncAuthFile(for store: AccountsStore) throws {
+        if let activeAccount = activeAccount(in: store) {
+            try AuthFileService.writeCurrentAuth(for: activeAccount)
+        } else {
+            try AuthFileService.clearCurrentAuth()
+        }
+    }
+
+    private func restoreAuthFile(from account: StoredAccount?) {
+        if let account {
+            try? AuthFileService.writeCurrentAuth(for: account)
+        } else {
+            try? AuthFileService.clearCurrentAuth()
+        }
+    }
+
+    private func activeAccount(in store: AccountsStore) -> StoredAccount? {
+        guard let activeAccountID = store.activeAccountID else {
+            return nil
+        }
+        return store.accounts.first(where: { $0.id == activeAccountID })
     }
 
     private func postMessage(_ text: String, isError: Bool = false) {

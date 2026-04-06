@@ -1,35 +1,21 @@
 import AppKit
-import SwiftUI
 
+@MainActor
 @main
-struct CodexSwitcherMenubarApp: App {
-    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @StateObject private var model = AppModel()
+enum CodexSwitcherMenubarMain {
+    private static let delegate = AppDelegate()
 
-    var body: some Scene {
-        MenuBarExtra {
-            MenuBarContentView()
-                .environmentObject(model)
-                .frame(width: 380)
-                .frame(minHeight: 560)
-        } label: {
-            MenuBarLabelView()
-                .environmentObject(model)
-        }
-        .menuBarExtraStyle(.window)
-
-        Window("Accounts", id: "accounts") {
-            AccountsManagementView()
-                .environmentObject(model)
-                .frame(minWidth: 680, minHeight: 560)
-        }
-        .defaultSize(width: 720, height: 620)
+    static func main() {
+        let app = NSApplication.shared
+        app.delegate = delegate
+        app.setActivationPolicy(.accessory)
+        app.run()
     }
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.accessory)
+        let model = AppModel.shared
 
         if let iconURL = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
            let icon = NSImage(contentsOf: iconURL)
@@ -38,5 +24,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             NSApp.applicationIconImage = AppIcon.makeApplicationIcon()
         }
+
+        AppUIController.shared.configure(with: model)
+        model.start()
     }
 }

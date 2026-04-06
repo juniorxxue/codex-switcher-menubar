@@ -8,6 +8,12 @@ enum AppPaths {
     private static let appFolderName = "CodexSwitcherMenubar"
 
     static var storageDirectory: URL {
+        if let explicit = ProcessInfo.processInfo.environment["CODEX_SWITCHER_MENUBAR_STORAGE_DIR"],
+           !explicit.isEmpty
+        {
+            return URL(fileURLWithPath: explicit, isDirectory: true)
+        }
+
         let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser
         return root.appendingPathComponent(appFolderName, isDirectory: true)
@@ -555,6 +561,7 @@ enum TokenRefreshService {
     private static let issuerURL = URL(string: "https://auth.openai.com/oauth/token")!
     private static let clientID = "app_EMoamEEZ73f0CkXaXp7hrann"
     private static let expirySkewSeconds = 60
+    private static let requestTimeout: TimeInterval = 15
 
     static func ensureFreshTokens(for account: StoredAccount) async throws -> StoredAccount {
         guard account.authMode == .chatGPT, let chatGPT = account.chatGPT else {
@@ -582,6 +589,7 @@ enum TokenRefreshService {
 
         var request = URLRequest(url: issuerURL)
         request.httpMethod = "POST"
+        request.timeoutInterval = requestTimeout
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
 
         let body = [
@@ -632,6 +640,7 @@ enum TokenRefreshService {
 enum UsageService {
     private static let usageURL = URL(string: "https://chatgpt.com/backend-api/wham/usage")!
     private static let userAgent = "codex-cli/1.0.0"
+    private static let requestTimeout: TimeInterval = 15
 
     static func fetchUsage(for account: StoredAccount) async throws -> AccountUsageResult {
         guard account.authMode == .chatGPT else {
@@ -655,6 +664,7 @@ enum UsageService {
 
         var request = URLRequest(url: usageURL)
         request.httpMethod = "GET"
+        request.timeoutInterval = requestTimeout
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         request.setValue("Bearer \(chatGPT.accessToken)", forHTTPHeaderField: "Authorization")
         if let accountID = chatGPT.accountID, !accountID.isEmpty {
@@ -701,6 +711,9 @@ enum UsageService {
 }
 
 enum CodexProcessService {
+    private static let processTimeoutNanoseconds: UInt64 = 1_000_000_000
+    private static let processPollIntervalNanoseconds: UInt64 = 50_000_000
+
     static func runningCodexStatus() -> CodexProcessStatus {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/bin/ps")
@@ -712,8 +725,17 @@ enum CodexProcessService {
 
         do {
             try task.run()
-            task.waitUntilExit()
         } catch {
+            return CodexProcessStatus()
+        }
+
+        let deadline = DispatchTime.now().uptimeNanoseconds + processTimeoutNanoseconds
+        while task.isRunning && DispatchTime.now().uptimeNanoseconds < deadline {
+            Thread.sleep(forTimeInterval: Double(processPollIntervalNanoseconds) / 1_000_000_000)
+        }
+
+        if task.isRunning {
+            task.terminate()
             return CodexProcessStatus()
         }
 
