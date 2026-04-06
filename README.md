@@ -27,7 +27,7 @@ This project is not trying to replace Codex Switcher. It is a smaller, faster, m
 - Switch between stored ChatGPT accounts from the macOS menu bar
 - Show current usage for the 5-hour and 7-day windows
 - Visualize recent usage history with a compact chart
-- Refresh usage manually whenever you want
+- Keep the active account fresh automatically and refresh manually whenever you want
 - Add accounts with the official ChatGPT OAuth flow
 - Import existing accounts from `.cswf` exports or `auth.json`
 - Open a management window for account setup, cleanup, and migration

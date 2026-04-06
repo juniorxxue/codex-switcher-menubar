@@ -20,6 +20,7 @@ final class AppModel: ObservableObject {
     private let minimumInitialLoadingDelay: TimeInterval = 0.35
     private var clearMessageTask: Task<Void, Never>?
     private var startupRefreshTask: Task<Void, Never>?
+    private var automaticUsageRefreshTask: Task<Void, Never>?
     private var oauthCompletionTask: Task<Void, Never>?
     private var hasStartedAppStartup = false
     private var hasStartedStartupRefresh = false
@@ -100,6 +101,7 @@ final class AppModel: ObservableObject {
 
     deinit {
         clearMessageTask?.cancel()
+        automaticUsageRefreshTask?.cancel()
     }
 
     func usageInfo(for accountID: UUID) -> UsageInfo? {
@@ -133,13 +135,7 @@ final class AppModel: ObservableObject {
 
         selectedAccountID = accountID
 
-        if usageByAccount[accountID] == nil,
-           !refreshingAccountIDs.contains(accountID)
-        {
-            Task { @MainActor [weak self] in
-                await self?.refreshUsage(for: accountID, announce: false)
-            }
-        }
+        queueUsageRefreshIfNeeded(for: accountID, maxAge: UsageRefreshPolicy.menuPresentationMaximumStaleness)
     }
 
     func refreshProcessStatus() async {
@@ -156,6 +152,7 @@ final class AppModel: ObservableObject {
 
         hasStartedAppStartup = true
         syncActiveAuthFileWithStore()
+        startAutomaticUsageRefreshIfNeeded()
 
         Task { @MainActor [weak self] in
             await self?.refreshProcessStatus()
@@ -201,12 +198,28 @@ final class AppModel: ObservableObject {
             Task { @MainActor [weak self] in
                 await self?.refreshProcessStatus()
             }
+
+            queueUsageRefreshIfNeeded(
+                for: accountID,
+                maxAge: UsageRefreshPolicy.menuPresentationMaximumStaleness
+            )
         } catch {
             store = previousStore
             syncSelectionWithStore(preferActive: true)
             restoreAuthFile(from: previousActiveAccount)
             postMessage(error.localizedDescription, isError: true)
         }
+    }
+
+    func refreshSelectedUsageIfStaleForMenuPresentation() {
+        guard let accountID = selectedAccount?.id else {
+            return
+        }
+
+        queueUsageRefreshIfNeeded(
+            for: accountID,
+            maxAge: UsageRefreshPolicy.menuPresentationMaximumStaleness
+        )
     }
 
     func refreshUsage(for accountID: UUID, announce: Bool = true) async {
@@ -466,6 +479,40 @@ final class AppModel: ObservableObject {
             defer { self.startupRefreshTask = nil }
             await self.refreshAllUsage(announce: false)
         }
+    }
+
+    private func startAutomaticUsageRefreshIfNeeded() {
+        guard !shouldSkipStartupUsageRefresh, automaticUsageRefreshTask == nil else {
+            return
+        }
+
+        automaticUsageRefreshTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+
+            while !Task.isCancelled {
+                try? await Task.sleep(for: UsageRefreshPolicy.backgroundRefreshCheckInterval)
+                guard !Task.isCancelled else { break }
+                await self.runAutomaticUsageRefreshTick()
+            }
+        }
+    }
+
+    private func runAutomaticUsageRefreshTick() async {
+        guard let activeAccount else {
+            return
+        }
+
+        await refreshProcessStatus()
+
+        let maximumStaleness = UsageRefreshPolicy.maximumBackgroundStaleness(
+            isCodexRunning: processStatus.hasRunningCodex
+        )
+
+        guard shouldRefreshUsage(for: activeAccount.id, maxAge: maximumStaleness) else {
+            return
+        }
+
+        await refreshUsage(for: activeAccount.id, announce: false)
     }
 
     private func scheduleInitialMenuLoadingDismissal() {
@@ -750,6 +797,36 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private func queueUsageRefreshIfNeeded(for accountID: UUID, maxAge: TimeInterval) {
+        guard shouldRefreshUsage(for: accountID, maxAge: maxAge) else {
+            return
+        }
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            guard self.shouldRefreshUsage(for: accountID, maxAge: maxAge) else {
+                return
+            }
+            await self.refreshUsage(for: accountID, announce: false)
+        }
+    }
+
+    private func shouldRefreshUsage(for accountID: UUID, maxAge: TimeInterval, now: Date = Date()) -> Bool {
+        guard !isRefreshingAll, !refreshingAccountIDs.contains(accountID) else {
+            return false
+        }
+
+        guard let usage = usageByAccount[accountID] else {
+            return true
+        }
+
+        return UsageRefreshPolicy.shouldRefresh(
+            usage: usage,
+            now: now,
+            maxAge: maxAge
+        )
+    }
+
     private func setUsage(_ usage: UsageInfo, for accountID: UUID) {
         var nextUsage = usageByAccount
         nextUsage[accountID] = usage
@@ -792,6 +869,27 @@ final class AppModel: ObservableObject {
             nextRefreshing.remove(accountID)
         }
         refreshingAccountIDs = nextRefreshing
+    }
+}
+
+struct UsageRefreshPolicy {
+    static let menuPresentationMaximumStaleness: TimeInterval = 120
+    static let activeUsageMaximumStalenessWhileCodexRunning: TimeInterval = 60
+    static let activeUsageMaximumStalenessWhileIdle: TimeInterval = 300
+    static let backgroundRefreshCheckInterval: Duration = .seconds(60)
+
+    static func shouldRefresh(usage: UsageInfo?, now: Date = Date(), maxAge: TimeInterval) -> Bool {
+        guard let usage else {
+            return true
+        }
+
+        return now.timeIntervalSince(usage.lastUpdatedAt) >= maxAge
+    }
+
+    static func maximumBackgroundStaleness(isCodexRunning: Bool) -> TimeInterval {
+        isCodexRunning
+            ? activeUsageMaximumStalenessWhileCodexRunning
+            : activeUsageMaximumStalenessWhileIdle
     }
 }
 

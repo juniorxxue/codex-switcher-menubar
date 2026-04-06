@@ -125,6 +125,7 @@ final class AppUIController: NSObject {
 
         if let popoverHostingController, let model {
             popoverHostingController.rootView = makeMenuBarRootView(for: model)
+            model.refreshSelectedUsageIfStaleForMenuPresentation()
         }
 
         NSApp.activate(ignoringOtherApps: true)
