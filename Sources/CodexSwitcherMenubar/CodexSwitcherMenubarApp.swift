@@ -6,6 +6,7 @@ enum CodexSwitcherMenubarMain {
     private static let delegate = AppDelegate()
 
     static func main() {
+        DebugLogger.startSession()
         let app = NSApplication.shared
         app.delegate = delegate
         app.setActivationPolicy(.accessory)
@@ -15,6 +16,7 @@ enum CodexSwitcherMenubarMain {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
+        DebugLogger.info("app", "Application did finish launching.")
         let model = AppModel.shared
 
         if let iconURL = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),

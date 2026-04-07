@@ -409,7 +409,22 @@ struct AccountsManagementView: View {
                         model.startOAuthAddAccount(named: newAccountName)
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(newAccountName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.pendingOAuthLogin != nil)
+                    .disabled(
+                        newAccountName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            || model.pendingOAuthLogin != nil
+                            || model.isStartingOAuthLogin
+                    )
+                }
+
+                if model.isStartingOAuthLogin {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                            .controlSize(.small)
+
+                        Text("Preparing ChatGPT sign-in...")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
                 if let pendingOAuthLogin = model.pendingOAuthLogin {
@@ -469,9 +484,25 @@ struct OAuthPendingCard: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
+            Text(pendingOAuthLogin.authURL.absoluteString)
+                .font(.system(.caption2, design: .monospaced))
+                .textSelection(.enabled)
+                .lineLimit(3)
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Color(nsColor: .textBackgroundColor))
+                )
+
             HStack(spacing: 10) {
                 Button("Open Browser Again") {
                     model.reopenOAuthBrowser()
+                }
+                .buttonStyle(.bordered)
+
+                Button("Copy Link") {
+                    model.copyPendingOAuthBrowserURL()
                 }
                 .buttonStyle(.bordered)
 

@@ -14,6 +14,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var processStatus = CodexProcessStatus()
     @Published private(set) var isInitialMenuLoadInProgress = true
     @Published private(set) var isRefreshingAll = false
+    @Published private(set) var isStartingOAuthLogin = false
     @Published private(set) var switchingAccountID: UUID?
     @Published var flashMessage: FlashMessage?
 
@@ -21,7 +22,9 @@ final class AppModel: ObservableObject {
     private var clearMessageTask: Task<Void, Never>?
     private var startupRefreshTask: Task<Void, Never>?
     private var automaticUsageRefreshTask: Task<Void, Never>?
+    private var oauthStartupTask: Task<Void, Never>?
     private var oauthCompletionTask: Task<Void, Never>?
+    private var oauthStartupID: UUID?
     private var hasStartedAppStartup = false
     private var hasStartedStartupRefresh = false
     private let shouldSkipStartupUsageRefresh = ProcessInfo.processInfo.environment["CODEX_SWITCHER_SKIP_STARTUP_REFRESH"] == "1"
@@ -90,6 +93,7 @@ final class AppModel: ObservableObject {
     }
 
     init() {
+        DebugLogger.info("app-model", "Initializing AppModel.")
         loadStore()
         loadUsageHistory()
         syncSelectionWithStore(preferActive: true)
@@ -102,6 +106,8 @@ final class AppModel: ObservableObject {
     deinit {
         clearMessageTask?.cancel()
         automaticUsageRefreshTask?.cancel()
+        oauthStartupTask?.cancel()
+        oauthCompletionTask?.cancel()
     }
 
     func usageInfo(for accountID: UUID) -> UsageInfo? {
@@ -151,6 +157,7 @@ final class AppModel: ObservableObject {
         }
 
         hasStartedAppStartup = true
+        DebugLogger.info("app-model", "Starting app model services.")
         syncActiveAuthFileWithStore()
         startAutomaticUsageRefreshIfNeeded()
 
@@ -266,24 +273,53 @@ final class AppModel: ObservableObject {
     func startOAuthAddAccount(named rawName: String) {
         let name = rawName.trimmed
         guard validateNewAccountName(name) else { return }
+        guard !isStartingOAuthLogin, pendingOAuthLogin == nil else { return }
 
+        DebugLogger.info("oauth", "Starting OAuth add-account flow for '\(name)'.")
         cancelOAuthAddAccount(silent: true)
+        let startupID = UUID()
+        oauthStartupID = startupID
+        isStartingOAuthLogin = true
 
-        Task { @MainActor [weak self] in
+        oauthStartupTask = Task { @MainActor [weak self] in
             guard let self else { return }
 
             do {
                 let session = try await OAuthLoginService.startLogin(accountName: name)
+                guard !Task.isCancelled, oauthStartupID == startupID else {
+                    DebugLogger.info("oauth", "Discarding OAuth session for '\(name)' because startup task was cancelled or replaced.")
+                    session.cancel()
+                    return
+                }
+
                 oauthLoginSession = session
                 pendingOAuthLogin = PendingOAuthLoginState(
                     accountName: name,
                     authURL: session.authURL,
                     callbackPort: session.callbackPort
                 )
+                isStartingOAuthLogin = false
+                oauthStartupTask = nil
+                oauthStartupID = nil
 
+                DebugLogger.info(
+                    "oauth",
+                    "OAuth session ready for '\(name)' on callback port \(session.callbackPort). Auth URL: \(DebugLogger.sanitizedURL(session.authURL))"
+                )
                 NSWorkspace.shared.open(session.authURL)
                 await waitForOAuthAddAccountCompletion(session)
+            } catch is CancellationError {
+                guard oauthStartupID == startupID else { return }
+                DebugLogger.info("oauth", "OAuth startup task cancelled for '\(name)'.")
+                isStartingOAuthLogin = false
+                oauthStartupTask = nil
+                oauthStartupID = nil
             } catch {
+                guard oauthStartupID == startupID else { return }
+                DebugLogger.error("oauth", "Failed to start OAuth flow for '\(name)': \(error.localizedDescription)")
+                isStartingOAuthLogin = false
+                oauthStartupTask = nil
+                oauthStartupID = nil
                 postMessage(error.localizedDescription, isError: true)
             }
         }
@@ -293,10 +329,27 @@ final class AppModel: ObservableObject {
         guard let authURL = pendingOAuthLogin?.authURL else {
             return
         }
+        DebugLogger.info("oauth", "Reopening browser for pending OAuth login: \(DebugLogger.sanitizedURL(authURL))")
         NSWorkspace.shared.open(authURL)
     }
 
+    func copyPendingOAuthBrowserURL() {
+        guard let authURL = pendingOAuthLogin?.authURL else {
+            return
+        }
+
+        DebugLogger.info("oauth", "Copying pending OAuth browser URL.")
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(authURL.absoluteString, forType: .string)
+        postMessage("Copied ChatGPT login link.")
+    }
+
     func cancelOAuthAddAccount(silent: Bool = false) {
+        DebugLogger.info("oauth", "Cancelling OAuth add-account flow. Silent: \(silent)")
+        oauthStartupTask?.cancel()
+        oauthStartupTask = nil
+        oauthStartupID = nil
+        isStartingOAuthLogin = false
         oauthCompletionTask?.cancel()
         oauthCompletionTask = nil
         oauthLoginSession?.cancel()
@@ -549,7 +602,12 @@ final class AppModel: ObservableObject {
                 let account = try await session.resultTask.value
                 guard oauthLoginSession === session else { return }
 
+                DebugLogger.info(
+                    "oauth",
+                    "OAuth login completed successfully for '\(account.name)' with callback port \(session.callbackPort)."
+                )
                 try insertAccount(account)
+                isStartingOAuthLogin = false
                 pendingOAuthLogin = nil
                 oauthLoginSession = nil
                 await activateAccount(account.id)
@@ -557,6 +615,11 @@ final class AppModel: ObservableObject {
             } catch {
                 guard oauthLoginSession === session else { return }
 
+                DebugLogger.error(
+                    "oauth",
+                    "OAuth login failed on callback port \(session.callbackPort): \(error.localizedDescription)"
+                )
+                isStartingOAuthLogin = false
                 pendingOAuthLogin = nil
                 oauthLoginSession = nil
 
@@ -787,6 +850,7 @@ final class AppModel: ObservableObject {
     private func postMessage(_ text: String, isError: Bool = false) {
         clearMessageTask?.cancel()
         flashMessage = FlashMessage(text: text, isError: isError)
+        DebugLogger.log(level: isError ? "ERROR" : "INFO", category: "flash", message: text)
 
         clearMessageTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(4))

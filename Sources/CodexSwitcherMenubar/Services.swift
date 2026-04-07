@@ -27,6 +27,16 @@ enum AppPaths {
         storageDirectory.appendingPathComponent("usage-history.json")
     }
 
+    static var debugLogFile: URL {
+        if let explicit = ProcessInfo.processInfo.environment["CODEX_SWITCHER_MENUBAR_LOG_FILE"],
+           !explicit.isEmpty
+        {
+            return URL(fileURLWithPath: explicit, isDirectory: false)
+        }
+
+        return storageDirectory.appendingPathComponent("debug.log")
+    }
+
     static var codexHome: URL {
         if let explicit = ProcessInfo.processInfo.environment["CODEX_HOME"], !explicit.isEmpty {
             return URL(fileURLWithPath: explicit, isDirectory: true)
@@ -48,6 +58,126 @@ enum AppPaths {
         try? FileManager.default.createDirectory(at: storageDirectory, withIntermediateDirectories: true)
         NSWorkspace.shared.activateFileViewerSelecting([storageDirectory])
     }
+}
+
+enum DebugLogger {
+    private static let queue = DispatchQueue(label: "CodexSwitcherMenubar.DebugLogger")
+    private static let maxLogBytes = 1_000_000
+    private static let state = DebugLoggerState()
+
+    static var logFileURL: URL {
+        AppPaths.debugLogFile
+    }
+
+    static func isEnabled(in environment: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
+        guard let rawValue = environment["CODEX_SWITCHER_MENUBAR_DEBUG"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        else {
+            return false
+        }
+
+        return ["1", "true", "yes", "on"].contains(rawValue)
+    }
+
+    static func startSession() {
+        guard isEnabled() else { return }
+        queue.async {
+            prepareLogFileIfNeeded()
+            guard !state.hasStartedSession else { return }
+            state.hasStartedSession = true
+            append("INFO", category: "app", message: "Starting session. Log file: \(logFileURL.path)")
+        }
+    }
+
+    static func info(_ category: String, _ message: String) {
+        log(level: "INFO", category: category, message: message)
+    }
+
+    static func error(_ category: String, _ message: String) {
+        log(level: "ERROR", category: category, message: message)
+    }
+
+    static func log(level: String, category: String, message: String) {
+        guard isEnabled() else { return }
+        queue.async {
+            prepareLogFileIfNeeded()
+            append(level, category: category, message: message)
+        }
+    }
+
+    static func sanitizedURL(_ url: URL) -> String {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let queryItems = components.queryItems
+        else {
+            return url.absoluteString
+        }
+
+        let sensitiveKeys = Set([
+            "access_token",
+            "code",
+            "code_verifier",
+            "id_token",
+            "refresh_token",
+            "state",
+            "token"
+        ])
+
+        components.queryItems = queryItems.map { item in
+            guard sensitiveKeys.contains(item.name.lowercased()) else {
+                return item
+            }
+            return URLQueryItem(name: item.name, value: "<redacted>")
+        }
+
+        return components.url?.absoluteString ?? url.absoluteString
+    }
+
+    static func querySummary(_ queryItems: [String: String]) -> String {
+        let interesting = queryItems.keys.sorted().joined(separator: ",")
+        return interesting.isEmpty ? "<none>" : interesting
+    }
+
+    private static func append(_ level: String, category: String, message: String) {
+        let timestamp = makeISO8601Formatter(withFractionalSeconds: true).string(from: Date())
+        let line = "\(timestamp) [\(level)] [\(category)] \(message)\n"
+
+        if let data = line.data(using: .utf8) {
+            if let handle = try? FileHandle(forWritingTo: logFileURL) {
+                do {
+                    try handle.seekToEnd()
+                    try handle.write(contentsOf: data)
+                    try handle.close()
+                } catch {
+                    try? handle.close()
+                }
+            } else {
+                try? data.write(to: logFileURL, options: [.atomic])
+            }
+        }
+
+        FileHandle.standardError.write(Data(line.utf8))
+    }
+
+    private static func prepareLogFileIfNeeded() {
+        try? AppPaths.ensureParentDirectory(for: logFileURL)
+
+        if let attributes = try? FileManager.default.attributesOfItem(atPath: logFileURL.path),
+           let size = attributes[.size] as? NSNumber,
+           size.intValue > maxLogBytes
+        {
+            try? FileManager.default.removeItem(at: logFileURL)
+        }
+
+        if !FileManager.default.fileExists(atPath: logFileURL.path) {
+            FileManager.default.createFile(atPath: logFileURL.path, contents: nil)
+            try? LocalStore.setRestrictedPermissions(logFileURL)
+        }
+    }
+}
+
+private final class DebugLoggerState: @unchecked Sendable {
+    var hasStartedSession = false
 }
 
 enum JSONCoding {

@@ -72,6 +72,17 @@ swift build
 swift run CodexSwitcherMenubar
 ```
 
+Enable local debug logging only when you need it:
+
+```bash
+CODEX_SWITCHER_MENUBAR_DEBUG=1 swift run CodexSwitcherMenubar
+```
+
+Optional:
+
+- override the log file path with `CODEX_SWITCHER_MENUBAR_LOG_FILE`
+- by default the log file is stored at `~/Library/Application Support/CodexSwitcherMenubar/debug.log`
+
 Build a `.dmg` release artifact:
 
 ```bash
